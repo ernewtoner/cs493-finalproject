@@ -32,7 +32,6 @@ AUTH0_AUDIENCE = env.get(constants.AUTH0_AUDIENCE)
 app = Flask(__name__, static_url_path='/public', static_folder='./public')
 app_url = 'https://newtoner-cs493-final-project.appspot.com'
 app.secret_key = str(uuid.uuid4())
-#app.secret_key = constants.SECRET_KEY
 app.debug = True
 client = datastore.Client()
 
@@ -71,7 +70,8 @@ def home():
 
 @app.route('/callback')
 def callback_handling():
-    auth0.authorize_access_token()
+    #auth0.authorize_access_token()
+    id_token = auth0.authorize_access_token()['id_token']
     resp = auth0.get('userinfo')
     userinfo = resp.json()
 
@@ -81,6 +81,7 @@ def callback_handling():
         'name': userinfo['name'],
         'picture': userinfo['picture']
     }
+    session['id_token'] = id_token
     return redirect('/dashboard')
 
 @app.route('/login')
@@ -98,8 +99,9 @@ def logout():
 def dashboard():
     return render_template('dashboard.html',
                            userinfo=session[constants.PROFILE_KEY],
-                           userinfo_pretty=json.dumps(session[constants.JWT_PAYLOAD], indent=4))
-
+                           userinfo_pretty=json.dumps(session[constants.JWT_PAYLOAD], indent=4),
+                           id_token=session['id_token'])
+    
 @app.route('/users', methods=['POST','GET'])
 def users_get_post():
     if request.method == 'POST':
