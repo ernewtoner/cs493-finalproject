@@ -12,6 +12,7 @@ from flask import render_template
 from flask import session
 from flask import url_for
 from flask import request
+from flask import make_response
 from authlib.flask.client import OAuth
 from six.moves.urllib.parse import urlencode
 
@@ -82,6 +83,29 @@ def callback_handling():
         'picture': userinfo['picture']
     }
     session['id_token'] = id_token
+
+    ###### Get all users in order to check if user has already been created
+    user_created = False
+    query = client.query(kind=constants.users)
+    results = list(query.fetch())
+    for e in results:
+        # Search for user
+        if id_token == e["jwt"]:
+            user_created = True # Don't create new user
+    
+    if not user_created:
+        new_user = datastore.entity.Entity(key=client.key(constants.users))
+        new_user.update({"auth0_id": userinfo['sub'], "nickname": userinfo['nickname'],
+                        "email": userinfo['email'], "jwt": id_token})
+        client.put(new_user)
+
+        """return (json.dumps({
+            "id": new_user.id,
+            "auth0_id": userinfo['sub'],
+            "name": userinfo['name'],
+            "email": userinfo["email"], 
+            "self": app_url + "/users/" + str(new_user.id)}), 201)"""
+
     return redirect('/dashboard')
 
 @app.route('/login')
@@ -102,9 +126,9 @@ def dashboard():
                            userinfo_pretty=json.dumps(session[constants.JWT_PAYLOAD], indent=4),
                            id_token=session['id_token'])
     
-@app.route('/users', methods=['POST','GET'])
+@app.route('/users', methods=['GET'])
 def users_get_post():
-    if request.method == 'POST':
+    """if request.method == 'POST':
         content = request.get_json()
 
         # If any required fields are missing respond with error message and 400 Bad Request
@@ -137,9 +161,9 @@ def users_get_post():
                 "password": new_user["password"],
                 "self": app_url + "/users/" + str(new_user.id)}), 201)
         else:
-            return (json.dumps({"Error": "The specified user already exists"}), 400)
+            return (json.dumps({"Error": "The specified user already exists"}), 400)"""
 
-    elif request.method == 'GET': # Get all users
+    if request.method == 'GET': # Get all users
         query = client.query(kind=constants.users)
     
         # Pagination
@@ -169,7 +193,7 @@ def users_get_post():
 # owned by a user, then there would be a relationship between the User and Boat entities. 
 # This meets the requirement of User entity being related to at least one of the non-user entities.
 
-@app.route('/boats', methods=['POST','GET'])
+@app.route('/boats', methods=['POST','GET', 'PUT', 'DELETE'])
 def boats_get_post():
     if request.method == 'POST':
         content = request.get_json()
@@ -209,10 +233,14 @@ def boats_get_post():
         if next_url:
             output["next"] = next_url
         return (json.dumps(output), 200)
+    elif request.method == 'PUT': # Unsupported edit all boats - 405
+        return (json.dumps({"Error": "This API doesn't allow you to edit all boats!"}), 405) 
+    elif request.method == 'DELETE': # Unsupported delete all boats - 405
+        return (json.dumps({"Error": "This API doesn't allow you to delete all boats!"}), 405) 
     else:
         return 'Method not recognized'
 
-@app.route('/boats/<id>', methods=['DELETE', 'GET'])
+@app.route('/boats/<id>', methods=['PATCH','PUT', 'DELETE', 'GET'])
 def boats_put_delete_get(id):
     if request.method == 'GET': # Get specific boat
         #content = request.get_json()
@@ -240,6 +268,129 @@ def boats_put_delete_get(id):
 
         client.delete(boat_key)
         return ('',204)
+    elif request.method == 'PATCH': # Allows updating any subset of attributes while the other attributes remain unchanged. 
+        # If client requests anything other than JSON for this endpoint, return error
+        if 'application/json' not in request.accept_mimetypes:
+            return (json.dumps({"Error": "Specified content type not supported"}), 406)
+        
+        content = request.get_json()
+        request_name = content.get("name")
+        request_type = content.get("type")
+        request_length = content.get("length")
+        request_loads = content.get("loads")
+
+         # 400 Bad Request if all fields are missing
+        if request_name == None and request_type == None and request_length == None and request_loads == None:
+            return (json.dumps({"Error": "The request object has no valid attributes"}), 400)
+
+        ###### Check types and whether any of the fields are empty
+        #validate_result = validate_request(request_name, request_type, request_length)
+        #if validate_result: # Return the error if there is one
+        #    return validate_result
+
+        # Attempt to get the boat from the datastore
+        boat_key = client.key(constants.boats, int(id))
+        boat = client.get(key=boat_key) 
+
+        # 404 Not Found if invalid boat ID
+        if boat == None:
+            return (json.dumps({"Error": "No boat with this boat_id exists"}), 404)
+
+        # If the request updates the boat name, check if the name already exists 
+        # and is not just the same as the specified boat's name
+        new_boat_name = content.get("name") 
+        if new_boat_name and new_boat_name != boat["name"]:
+            # Get all boats in order to check if new boat name is unique
+            query = client.query(kind=constants.boats)
+            results = list(query.fetch())
+            for e in results:
+                if e["name"] == new_boat_name:
+                    return (json.dumps({"Error": "That boat name already exists!"}), 403) # Return 403 if not unique
+        
+        # Update the datastore according to the fields entered
+        if request_name:
+            boat.update({"name": content["name"]})
+
+        if request_type:
+            boat.update({"type": content["type"]})
+
+        if request_length:
+            boat.update({"length": content["length"]})
+
+        if request_loads:
+            boat.update({"loads": content["loads"]})
+
+        client.put(boat)
+
+        return (json.dumps({
+            "id": boat.id, 
+            "name": boat["name"], 
+            "type": boat["type"],
+            "length": boat["length"],
+            "loads": boat["loads"],
+            "self": app_url + "/boats/" + str(boat.id)}), 200)
+    elif request.method == 'PUT':
+        # If client requests anything other than JSON for this endpoint, return error
+        if 'application/json' not in request.accept_mimetypes:
+            return (json.dumps({"Error": "Specified content type not supported"}), 406)
+
+        content = request.get_json()
+        request_name = content.get("name")
+        request_type = content.get("type")
+        request_length = content.get("length")
+        request_loads = content.get("loads")
+
+        # 400 Bad Request if any fields are missing
+        if request_name == None or request_type == None or request_length == None or request_loads == None:
+            return (json.dumps({"Error": "The request object does not have all required attributes"}), 400)
+
+        ###### Check types and whether any of the fields are empty
+        #validate_result = validate_request(request_name, request_type, request_length)
+        #if validate_result: # Return the error if there is one
+        #    return validate_result
+
+        # Attempt to get the boat from the datastore
+        boat_key = client.key(constants.boats, int(id))
+        boat = client.get(key=boat_key)
+
+        # 404 Not Found if invalid boat ID
+        if boat == None:
+            return (json.dumps({"Error": "No boat with this boat_id exists"}), 404)
+
+        # Check if the name they're requesting already exists and is not the specified boat's name
+        new_boat_name = content.get("name")
+
+        if new_boat_name != boat["name"]:
+            # Get all boats in order to check if new boat name is unique
+            query = client.query(kind=constants.boats)
+            results = list(query.fetch())
+            for e in results:
+                if e["name"] == new_boat_name:
+                    return (json.dumps({"Error": "That boat name already exists!"}), 403) # Return 403 if not unique
+            
+        # Update the datastore
+        boat.update({"name": content["name"], "type": content["type"],
+          "length": content["length"], "loads": content["loads"]})
+        client.put(boat)
+
+        # Set header with location of boat
+        boat_url = app_url + "/boats/" + str(boat.id)
+
+        # Make JSON response
+        res = make_response(json.dumps({
+            "id": boat.id, 
+            "name": boat["name"], 
+            "type": boat["type"],
+            "length": boat["length"],
+            "loads": boat["loads"],
+            "self": boat_url}))
+            
+        res.headers.set('Boat-Location', boat_url)
+        res.mimetype = 'application/json'
+        res.status_code = 303
+
+        return res
+    
     else:
         return 'Method not recognized'
 
