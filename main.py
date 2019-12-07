@@ -71,7 +71,6 @@ def home():
 
 @app.route('/callback')
 def callback_handling():
-    #auth0.authorize_access_token()
     id_token = auth0.authorize_access_token()['id_token']
     resp = auth0.get('userinfo')
     userinfo = resp.json()
@@ -90,7 +89,8 @@ def callback_handling():
     results = list(query.fetch())
     for e in results:
         # Search for user
-        if id_token == e["jwt"]:
+        #if id_token == e["jwt"]:
+        if userinfo['sub'] == e['auth0_id']:
             user_created = True # Don't create new user
     
     if not user_created:
@@ -98,13 +98,6 @@ def callback_handling():
         new_user.update({"auth0_id": userinfo['sub'], "nickname": userinfo['nickname'],
                         "email": userinfo['email'], "jwt": id_token})
         client.put(new_user)
-
-        """return (json.dumps({
-            "id": new_user.id,
-            "auth0_id": userinfo['sub'],
-            "name": userinfo['name'],
-            "email": userinfo["email"], 
-            "self": app_url + "/users/" + str(new_user.id)}), 201)"""
 
     return redirect('/dashboard')
 
@@ -186,12 +179,42 @@ def users_get_post():
     else:
         return 'Method not recognized'
 
+@app.route('/users/<id>', methods=['GET'])
+def users_get(id):
+    if request.method == 'GET': # Get specific user
+        user_key = client.key(constants.users, int(id))
+        user = client.get(key=user_key)
+
+        # 404 Not Found if invalid boat ID
+        if user == None:
+            return (json.dumps({"Error": "No user with this user_id exists"}), 404)
+
+        return json.dumps({
+            "id": user_key.id, 
+            "name": user["name"], 
+            "type": user["auth0_id"],
+            "length": user["nickname"],
+            "loads": user["email"],
+            "self": app_url + "/users/" + str(user_key.id)})
+
+#### You must provide a REST API endpoint so that a user can see all the instances 
+#### of the non-user entity that were created by them.
+@app.route('/users/<id>/boats', methods=['GET'])
+def user_get_boats(id):
+    if request.method == 'GET':
+        ###### Get all boats for specified user
+        query = client.query(kind=constants.boats)
+        query.add_filter('owner', '=', id)
+        results = list(query.fetch())
+        for e in results:
+            e["id"] = e.key.id
+        return (json.dumps(results), 200)
+    else:
+        return 'Method not recognized'
+
 ##### Boats API
 
-# Additionally for this project, you need a relationship between the User entity 
-# and a non-user entity. If you were to enhance Assignment 4 so that a boat is 
-# owned by a user, then there would be a relationship between the User and Boat entities. 
-# This meets the requirement of User entity being related to at least one of the non-user entities.
+#### What endpoints need authentication?
 
 @app.route('/boats', methods=['POST','GET', 'PUT', 'DELETE'])
 def boats_get_post():
@@ -199,12 +222,12 @@ def boats_get_post():
         content = request.get_json()
 
         # If any required fields are missing respond with error message and 400 Bad Request
-        if content.get("name") == None or content.get("type") == None or content.get("length") == None or content.get("loads") == None:
+        if content.get("name") == None or content.get("type") == None or content.get("length") == None or content.get("loads") == None or content.get("owner") == None:
             return (json.dumps({"Error": "The request object is missing at least one of the required attributes"}), 400)
         
         new_boat = datastore.entity.Entity(key=client.key(constants.boats))
         new_boat.update({"name": content["name"], "type": content["type"],
-          "length": content["length"], "loads": content["loads"]})
+          "length": content["length"], "loads": content["loads"], "owner": content["owner"]})
         client.put(new_boat)
         return (json.dumps({
             "id": new_boat.id, 
@@ -212,6 +235,7 @@ def boats_get_post():
             "type": new_boat["type"],
             "length": new_boat["length"],
             "loads": new_boat["loads"],
+            "owner": new_boat["owner"],
             "self": app_url + "/boats/" + str(new_boat.id)}), 201)        
     elif request.method == 'GET': # Get all boats
         query = client.query(kind=constants.boats)
@@ -243,7 +267,6 @@ def boats_get_post():
 @app.route('/boats/<id>', methods=['PATCH','PUT', 'DELETE', 'GET'])
 def boats_put_delete_get(id):
     if request.method == 'GET': # Get specific boat
-        #content = request.get_json()
         boat_key = client.key(constants.boats, int(id))
         boat = client.get(key=boat_key)
 
@@ -257,6 +280,7 @@ def boats_put_delete_get(id):
             "type": boat["type"],
             "length": boat["length"],
             "loads": boat["loads"],
+            "owner": boat["owner"],
             "self": app_url + "/boats/" + str(boat_key.id)})
     elif request.method == 'DELETE': # Delete specific boat
         boat_key = client.key(constants.boats, int(id))
@@ -278,15 +302,11 @@ def boats_put_delete_get(id):
         request_type = content.get("type")
         request_length = content.get("length")
         request_loads = content.get("loads")
+        request_owner = content.get("owner")
 
          # 400 Bad Request if all fields are missing
-        if request_name == None and request_type == None and request_length == None and request_loads == None:
+        if request_name == None and request_type == None and request_length == None and request_loads == None and request_owner == None:
             return (json.dumps({"Error": "The request object has no valid attributes"}), 400)
-
-        ###### Check types and whether any of the fields are empty
-        #validate_result = validate_request(request_name, request_type, request_length)
-        #if validate_result: # Return the error if there is one
-        #    return validate_result
 
         # Attempt to get the boat from the datastore
         boat_key = client.key(constants.boats, int(id))
@@ -320,6 +340,9 @@ def boats_put_delete_get(id):
         if request_loads:
             boat.update({"loads": content["loads"]})
 
+        if request_owner:
+            boat.update({"owner": content["owner"]})
+
         client.put(boat)
 
         return (json.dumps({
@@ -328,6 +351,7 @@ def boats_put_delete_get(id):
             "type": boat["type"],
             "length": boat["length"],
             "loads": boat["loads"],
+            "owner": boat["owner"],
             "self": app_url + "/boats/" + str(boat.id)}), 200)
     elif request.method == 'PUT':
         # If client requests anything other than JSON for this endpoint, return error
@@ -339,15 +363,11 @@ def boats_put_delete_get(id):
         request_type = content.get("type")
         request_length = content.get("length")
         request_loads = content.get("loads")
+        request_owner = content.get("owner")
 
-        # 400 Bad Request if any fields are missing
-        if request_name == None or request_type == None or request_length == None or request_loads == None:
+        # 400 Bad Request if any required fields are missing
+        if request_name == None or request_type == None or request_length == None or request_loads == None or request_owner == None:
             return (json.dumps({"Error": "The request object does not have all required attributes"}), 400)
-
-        ###### Check types and whether any of the fields are empty
-        #validate_result = validate_request(request_name, request_type, request_length)
-        #if validate_result: # Return the error if there is one
-        #    return validate_result
 
         # Attempt to get the boat from the datastore
         boat_key = client.key(constants.boats, int(id))
@@ -370,7 +390,7 @@ def boats_put_delete_get(id):
             
         # Update the datastore
         boat.update({"name": content["name"], "type": content["type"],
-          "length": content["length"], "loads": content["loads"]})
+          "length": content["length"], "loads": content["loads"], "owner": content["owner"]})
         client.put(boat)
 
         # Set header with location of boat
@@ -383,6 +403,7 @@ def boats_put_delete_get(id):
             "type": boat["type"],
             "length": boat["length"],
             "loads": boat["loads"],
+            "owner": boat["owner"],
             "self": boat_url}))
             
         res.headers.set('Boat-Location', boat_url)
@@ -393,6 +414,8 @@ def boats_put_delete_get(id):
     
     else:
         return 'Method not recognized'
+
+########### Loads implement PUT and PATCH
 
 @app.route('/loads', methods=['POST', 'GET'])
 def loads_get_post():
@@ -531,14 +554,6 @@ def loads_put_delete_boat(load_id, boat_id):
 
         # If the load wasn't found in the boat, return 403
         return (json.dumps({"Error": "That load is not in the specified boat"}), 403)
-        
-# You must provide a REST API endpoint so that a user can see all the instances 
-# of the non-user entity that were created by them.
-
-# @app.route('/users/<user_id>/boats', methods=['GET', 'DELETE'])
-# def loads_put_delete_boat(load_id, boat_id):
-
-
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=env.get('PORT', 3000))
