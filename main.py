@@ -89,10 +89,13 @@ def callback_handling():
     results = list(query.fetch())
     for e in results:
         # Search for user
-        #if id_token == e["jwt"]:
         if userinfo['sub'] == e['auth0_id']:
             user_created = True # Don't create new user
-    
+            # But if their JWT has changed update it
+            if id_token != e['jwt']:
+                e['jwt'] = id_token
+                client.put(e)
+
     if not user_created:
         new_user = datastore.entity.Entity(key=client.key(constants.users))
         new_user.update({"auth0_id": userinfo['sub'], "nickname": userinfo['nickname'],
@@ -191,10 +194,9 @@ def users_get(id):
 
         return json.dumps({
             "id": user_key.id, 
-            "name": user["name"], 
-            "type": user["auth0_id"],
-            "length": user["nickname"],
-            "loads": user["email"],
+            "auth0_id": user["auth0_id"],
+            "nickname": user["nickname"],
+            "email": user["email"],
             "self": app_url + "/users/" + str(user_key.id)})
 
 #### You must provide a REST API endpoint so that a user can see all the instances 
@@ -214,8 +216,7 @@ def user_get_boats(id):
 
 ##### Boats API
 
-#### What endpoints need authentication?
-
+#### TODO What endpoints need authentication? POST boat done, put load on boat?
 @app.route('/boats', methods=['POST','GET', 'PUT', 'DELETE'])
 def boats_get_post():
     if request.method == 'POST':
@@ -225,6 +226,30 @@ def boats_get_post():
         if content.get("name") == None or content.get("type") == None or content.get("length") == None or content.get("loads") == None or content.get("owner") == None:
             return (json.dumps({"Error": "The request object is missing at least one of the required attributes"}), 400)
         
+        ###### JWT Authorization
+        # Make sure the authorization header exists
+        jwt_header = request.headers.get('Authorization')
+        if jwt_header == None:
+            return (json.dumps({"Error": "You must be an authorized user to create a boat"}), 401)
+
+        # Check for the 'Bearer' prefix
+        jwt_strings = jwt_header.split()
+        jwt_prefix = jwt_strings[0]
+        jwt_header_token = jwt_strings[1]
+
+        if jwt_prefix != 'Bearer':
+            return (json.dumps({"Error": "You must pass a Bearer token to authenticate"}), 401)
+
+        ###### Get the user specified as owner of the boat and verify that their JWT matches the authorization header
+        query = client.query(kind=constants.users)
+        query.add_filter('auth0_id', '=', content["owner"])
+        results = list(query.fetch())
+
+        # Should only have 1 user result but just in case
+        for e in results:
+            if e["jwt"] != jwt_header_token:
+                return (json.dumps({"Error": "You are not authorized to create a boat owned by that user"}), 401)
+
         new_boat = datastore.entity.Entity(key=client.key(constants.boats))
         new_boat.update({"name": content["name"], "type": content["type"],
           "length": content["length"], "loads": content["loads"], "owner": content["owner"]})
@@ -411,29 +436,25 @@ def boats_put_delete_get(id):
         res.status_code = 303
 
         return res
-    
     else:
         return 'Method not recognized'
 
-########### Loads implement PUT and PATCH
-
-@app.route('/loads', methods=['POST', 'GET'])
+@app.route('/loads', methods=['POST', 'GET', 'PUT', 'DELETE'])
 def loads_get_post():
     if request.method == 'POST':
         content = request.get_json()
         
         # 400 Bad Request if the required field is missing
-        if content.get("weight") == None or content.get("carrier") == None or content.get("content") == None or content.get("delivery_date") == None:
+        if content.get("weight") == None or content.get("content") == None or content.get("delivery_date") == None:
             return (json.dumps({"Error": "The request object is missing a required field"}), 400)
         
         new_load = datastore.entity.Entity(key=client.key(constants.loads))
-        new_load.update({"weight": content["weight"], "carrier": content["carrier"], 
-        "content": content["content"], "delivery_date": content["delivery_date"]})
+        new_load.update({"weight": content["weight"], "content": content["content"], 
+                        "delivery_date": content["delivery_date"]})
         client.put(new_load)
         return (json.dumps({
             "id": new_load.id, 
             "weight": new_load["weight"],
-            "carrier": new_load["carrier"],
             "content": new_load["content"],
             "delivery_date": new_load["delivery_date"],
             "self": app_url + "/loads/" + str(new_load.id)}), 201)
@@ -456,11 +477,15 @@ def loads_get_post():
         output = {"loads": results}
         if next_url:
             output["next"] = next_url
-        return (json.dumps(output), 200)    
+        return (json.dumps(output), 200)
+    elif request.method == 'PUT': # Unsupported edit all boats - 405
+        return (json.dumps({"Error": "This API doesn't allow you to edit all loads!"}), 405) 
+    elif request.method == 'DELETE': # Unsupported delete all boats - 405
+        return (json.dumps({"Error": "This API doesn't allow you to delete all loads!"}), 405)
     else:
         return 'Method not recognized'
 
-@app.route('/loads/<id>', methods=['DELETE', 'GET'])
+@app.route('/loads/<id>', methods=['DELETE', 'GET', 'PUT', 'PATCH'])
 def loads_put_delete_get(id):
     # Get load from datastore
     load_key = client.key(constants.loads, int(id))
@@ -474,7 +499,6 @@ def loads_put_delete_get(id):
         return (json.dumps({
             "id": load.id,
             "weight": load["weight"],
-            "carrier": load["carrier"],
             "content": load["content"],
             "delivery_date": load["delivery_date"],
             "self": app_url + "/loads/" + str(load_key.id)}), 200)
@@ -493,6 +517,92 @@ def loads_put_delete_get(id):
         # Remove the load from datastore
         client.delete(load_key)
         return ("", 204)
+    elif request.method == 'PATCH': # Allows updating any subset of attributes while the other attributes remain unchanged. 
+        # If client requests anything other than JSON for this endpoint, return error
+        if 'application/json' not in request.accept_mimetypes:
+            return (json.dumps({"Error": "Specified content type not supported"}), 406)
+        
+        content = request.get_json()
+        request_weight = content.get("weight")
+        request_content = content.get("content")
+        request_delivery_date = content.get("delivery_date")
+
+         # 400 Bad Request if all fields are missing
+        if request_weight == None and request_content == None and request_delivery_date == None:
+            return (json.dumps({"Error": "The request object has no valid attributes"}), 400)
+
+        # Attempt to get the load from the datastore
+        load_key = client.key(constants.loads, int(id))
+        load = client.get(key=load_key) 
+
+        # 404 Not Found if invalid load ID
+        if load == None:
+            return (json.dumps({"Error": "No load with this load_id exists"}), 404)
+        
+        # Update the datastore according to the fields entered
+        if request_weight:
+            load.update({"weight": content["weight"]})
+
+        if request_content:
+            load.update({"content": content["content"]})
+
+        if request_delivery_date:
+            load.update({"delivery_date": content["delivery_date"]})
+
+        client.put(load)
+
+        return (json.dumps({
+            "id": load.id, 
+            "weight": load["weight"],
+            "content": load["content"],
+            "delivery_date": load["delivery_date"],
+            "self": app_url + "/loads/" + str(load.id)}), 201)
+    elif request.method == 'PUT':
+        # If client requests anything other than JSON for this endpoint, return error
+        if 'application/json' not in request.accept_mimetypes:
+            return (json.dumps({"Error": "Specified content type not supported"}), 406)
+
+        content = request.get_json()
+        request_weight = content.get("weight")
+        request_content = content.get("content")
+        request_delivery_date = content.get("delivery_date")
+
+         # 400 Bad Request if all fields are missing
+        if request_weight == None and request_content == None and request_delivery_date == None:
+            return (json.dumps({"Error": "The request object does not have all required attributes"}), 400)
+
+        # Attempt to get the load from the datastore
+        load_key = client.key(constants.loads, int(id))
+        load = client.get(key=load_key)
+
+        # 404 Not Found if invalid load ID
+        if load == None:
+            return (json.dumps({"Error": "No load with this load_id exists"}), 404)
+            
+        # Update the datastore
+        load.update({"weight": content["weight"], "content": content["content"], 
+                     "delivery_date": content["delivery_date"]})
+        client.put(load)
+
+        # Set header with location of load
+        load_url = app_url + "/loads/" + str(load.id)
+
+        # Make JSON response
+        res = make_response(json.dumps({
+            "id": load.id, 
+            "weight": load["weight"], 
+            "content": load["content"],
+            "delivery_date": load["delivery_date"],
+            "self": load_url}))
+            
+        res.headers.set('Load-Location', load_url)
+        res.mimetype = 'application/json'
+        res.status_code = 303
+
+        return res
+    else:
+        return 'Method not recognized'
+
 
 # Get all loads on a boat
 @app.route('/boats/<boat_id>/loads', methods=['GET'])
@@ -501,7 +611,6 @@ def get_boat_loads(boat_id):
     boat = client.get(key=boat_key)
 
     if request.method == 'GET':
-        print(boat["loads"])
         return (json.dumps({
             "loads": boat["loads"],
             "self": app_url + "/boats/" + str(boat_key.id) + "/loads"}), 200)
@@ -527,9 +636,7 @@ def loads_put_delete_boat(load_id, boat_id):
 
         # Check that the load does not already exist in any boat
         for e in results: # Each boat entity
-            #print(e)
             for l in e["loads"]: # Each load that boat carries
-                #print(l)
                 if l.get("id") == load.id:
                     return (json.dumps({"Error": "The specified load already exists in a boat"}), 403)
 
@@ -546,8 +653,6 @@ def loads_put_delete_boat(load_id, boat_id):
         # Check for the load in the boat
         for i, l in enumerate(boat["loads"]):
             if load.id == l.get("id"):
-                 print("HERE")
-
                  boat["loads"].pop(i) # Remove if so and update datastore
                  client.put(boat)
                  return ('',204)
