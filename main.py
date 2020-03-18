@@ -13,7 +13,7 @@ from flask import session
 from flask import url_for
 from flask import request
 from flask import make_response
-from authlib.flask.client import OAuth
+from authlib.integrations.flask_client import OAuth
 from six.moves.urllib.parse import urlencode
 
 import constants
@@ -69,6 +69,7 @@ def requires_auth(f):
 def home():
     return render_template('home.html')
 
+##### Auth routes
 @app.route('/callback')
 def callback_handling():
     id_token = auth0.authorize_access_token()['id_token']
@@ -121,49 +122,19 @@ def dashboard():
                            userinfo=session[constants.PROFILE_KEY],
                            userinfo_pretty=json.dumps(session[constants.JWT_PAYLOAD], indent=4),
                            id_token=session['id_token'])
-    
+
+##### User routes
 @app.route('/users', methods=['GET'])
-def users_get_post():
-    """if request.method == 'POST':
-        content = request.get_json()
-
-        # If any required fields are missing respond with error message and 400 Bad Request
-        if content.get("name") == None or content.get("email") == None: #or content.get("password") == None:
-            return (json.dumps({"Error": "The request object is missing at least one of the required attributes"}), 400)
-
-        jwt_header = request.headers.get('Authorization')
-        #if jwt_header == None:
-        # have to be authorized to create user?
-
-        ###### Get all users in order to check if user has already been created
-        user_created = False
-        query = client.query(kind=constants.users)
-        results = list(query.fetch())
-        for e in results:
-            # Search for user
-            if jwt_header == e["jwt"]:
-                user_created = True # Don't create new user
-                #user_name = e["owner"]
-        
-        if not user_created:
-            new_user = datastore.entity.Entity(key=client.key(constants.users))
-            new_user.update({"name": content["name"], "email": content["email"],
-                            "jwt": jwt_header})
-            client.put(new_user)
-            return (json.dumps({
-                "id": new_user.id, 
-                "name": new_user["name"], 
-                "email": new_user["email"],
-                "password": new_user["password"],
-                "self": app_url + "/users/" + str(new_user.id)}), 201)
-        else:
-            return (json.dumps({"Error": "The specified user already exists"}), 400)"""
+def users_get():
+    # If client request does not include JSON, return error
+    if 'application/json' not in request.accept_mimetypes:
+        return (json.dumps({"Error": "Specified content type not supported"}), 406)
 
     if request.method == 'GET': # Get all users
         query = client.query(kind=constants.users)
     
         # Pagination
-        q_limit = int(request.args.get('limit', '3'))
+        q_limit = int(request.args.get('limit', '5'))
         q_offset = int(request.args.get('offset', '0'))
         l_iterator = query.fetch(limit=q_limit, offset=q_offset)
         pages = l_iterator.pages
@@ -182,25 +153,6 @@ def users_get_post():
     else:
         return 'Method not recognized'
 
-@app.route('/users/<id>', methods=['GET'])
-def users_get(id):
-    if request.method == 'GET': # Get specific user
-        user_key = client.key(constants.users, int(id))
-        user = client.get(key=user_key)
-
-        # 404 Not Found if invalid boat ID
-        if user == None:
-            return (json.dumps({"Error": "No user with this user_id exists"}), 404)
-
-        return json.dumps({
-            "id": user_key.id, 
-            "auth0_id": user["auth0_id"],
-            "nickname": user["nickname"],
-            "email": user["email"],
-            "self": app_url + "/users/" + str(user_key.id)})
-
-#### You must provide a REST API endpoint so that a user can see all the instances 
-#### of the non-user entity that were created by them.
 @app.route('/users/<id>/boats', methods=['GET'])
 def user_get_boats(id):
     if request.method == 'GET':
@@ -214,11 +166,47 @@ def user_get_boats(id):
     else:
         return 'Method not recognized'
 
-##### Boats API
+##### Boats and Loads API
 
-#### TODO What endpoints need authentication? POST boat done, put load on boat?
+# Verify the provided JWT header matches the specified owner of the boat
+def verify_jwt_header(user):
+    '''
+    This function checks to see if the token exists and matches the specified user/boat owner.
+
+    @param user  the authenticated user
+    @return None if no error, json with a return code if authentication was not successful
+    '''
+    # Make sure the authorization header exists
+    jwt_header = request.headers.get('Authorization')
+    if jwt_header == None:
+        return (json.dumps({"Error": "You must be an authorized user to create or modify a boat"}), 401)
+
+    # Check for the 'Bearer' prefix
+    jwt_strings = jwt_header.split()
+    jwt_prefix = jwt_strings[0]
+    jwt_header_token = jwt_strings[1]
+
+    if jwt_prefix != 'Bearer':
+        return (json.dumps({"Error": "You must pass a Bearer token to authenticate"}), 401)
+ 
+    # Get the user specified as owner of the boat and verify that their JWT matches the authorization header
+    query = client.query(kind=constants.users)
+    query.add_filter('auth0_id', '=', user)
+    results = list(query.fetch())
+
+    # Should only have 1 user result but just in case
+    for e in results:
+        if e["jwt"] != jwt_header_token:
+            return (json.dumps({"Error": "You are not authorized to create or modify a boat owned by that user"}), 401)
+
+    # Return None if successful
+    return None
+
 @app.route('/boats', methods=['POST','GET', 'PUT', 'DELETE'])
-def boats_get_post():
+def boats_get_post_put_delete():
+    if 'application/json' not in request.accept_mimetypes:
+        return (json.dumps({"Error": "Specified content type not supported"}), 406)
+
     if request.method == 'POST':
         content = request.get_json()
 
@@ -226,29 +214,10 @@ def boats_get_post():
         if content.get("name") == None or content.get("type") == None or content.get("length") == None or content.get("loads") == None or content.get("owner") == None:
             return (json.dumps({"Error": "The request object is missing at least one of the required attributes"}), 400)
         
-        ###### JWT Authorization
-        # Make sure the authorization header exists
-        jwt_header = request.headers.get('Authorization')
-        if jwt_header == None:
-            return (json.dumps({"Error": "You must be an authorized user to create a boat"}), 401)
-
-        # Check for the 'Bearer' prefix
-        jwt_strings = jwt_header.split()
-        jwt_prefix = jwt_strings[0]
-        jwt_header_token = jwt_strings[1]
-
-        if jwt_prefix != 'Bearer':
-            return (json.dumps({"Error": "You must pass a Bearer token to authenticate"}), 401)
-
-        ###### Get the user specified as owner of the boat and verify that their JWT matches the authorization header
-        query = client.query(kind=constants.users)
-        query.add_filter('auth0_id', '=', content["owner"])
-        results = list(query.fetch())
-
-        # Should only have 1 user result but just in case
-        for e in results:
-            if e["jwt"] != jwt_header_token:
-                return (json.dumps({"Error": "You are not authorized to create a boat owned by that user"}), 401)
+        # Verify the provided JWT header matches the specified owner of the boat
+        auth_error = verify_jwt_header(content["owner"])
+        if auth_error:
+            return auth_error
 
         new_boat = datastore.entity.Entity(key=client.key(constants.boats))
         new_boat.update({"name": content["name"], "type": content["type"],
@@ -266,7 +235,7 @@ def boats_get_post():
         query = client.query(kind=constants.boats)
     
         # Pagination
-        q_limit = int(request.args.get('limit', '3'))
+        q_limit = int(request.args.get('limit', '5'))
         q_offset = int(request.args.get('offset', '0'))
         l_iterator = query.fetch(limit=q_limit, offset=q_offset)
         pages = l_iterator.pages
@@ -290,7 +259,10 @@ def boats_get_post():
         return 'Method not recognized'
 
 @app.route('/boats/<id>', methods=['PATCH','PUT', 'DELETE', 'GET'])
-def boats_put_delete_get(id):
+def boats_patch_put_delete_get(id):
+    if 'application/json' not in request.accept_mimetypes:
+        return (json.dumps({"Error": "Specified content type not supported"}), 406)
+
     if request.method == 'GET': # Get specific boat
         boat_key = client.key(constants.boats, int(id))
         boat = client.get(key=boat_key)
@@ -315,13 +287,14 @@ def boats_put_delete_get(id):
         if boat == None:
             return (json.dumps({"Error": "No boat with this boat_id exists"}), 404)
 
+        # Verify the provided JWT header matches the specified owner of the boat
+        auth_error = verify_jwt_header(boat["owner"])
+        if auth_error:
+            return auth_error
+
         client.delete(boat_key)
         return ('',204)
     elif request.method == 'PATCH': # Allows updating any subset of attributes while the other attributes remain unchanged. 
-        # If client requests anything other than JSON for this endpoint, return error
-        if 'application/json' not in request.accept_mimetypes:
-            return (json.dumps({"Error": "Specified content type not supported"}), 406)
-        
         content = request.get_json()
         request_name = content.get("name")
         request_type = content.get("type")
@@ -340,6 +313,15 @@ def boats_put_delete_get(id):
         # 404 Not Found if invalid boat ID
         if boat == None:
             return (json.dumps({"Error": "No boat with this boat_id exists"}), 404)
+
+        # If owner specified verify the provided JWT header matches the owner
+        if request_owner:
+            auth_error = verify_jwt_header(content["owner"])
+        else:
+            auth_error = verify_jwt_header(boat["owner"])
+        
+        if auth_error:
+            return auth_error
 
         # If the request updates the boat name, check if the name already exists 
         # and is not just the same as the specified boat's name
@@ -379,10 +361,6 @@ def boats_put_delete_get(id):
             "owner": boat["owner"],
             "self": app_url + "/boats/" + str(boat.id)}), 200)
     elif request.method == 'PUT':
-        # If client requests anything other than JSON for this endpoint, return error
-        if 'application/json' not in request.accept_mimetypes:
-            return (json.dumps({"Error": "Specified content type not supported"}), 406)
-
         content = request.get_json()
         request_name = content.get("name")
         request_type = content.get("type")
@@ -401,6 +379,11 @@ def boats_put_delete_get(id):
         # 404 Not Found if invalid boat ID
         if boat == None:
             return (json.dumps({"Error": "No boat with this boat_id exists"}), 404)
+
+        # Verify the provided JWT header matches the specified owner of the boat
+        auth_error = verify_jwt_header(content["owner"])
+        if auth_error:
+            return auth_error
 
         # Check if the name they're requesting already exists and is not the specified boat's name
         new_boat_name = content.get("name")
@@ -431,7 +414,6 @@ def boats_put_delete_get(id):
             "owner": boat["owner"],
             "self": boat_url}))
             
-        res.headers.set('Boat-Location', boat_url)
         res.mimetype = 'application/json'
         res.status_code = 303
 
@@ -440,7 +422,11 @@ def boats_put_delete_get(id):
         return 'Method not recognized'
 
 @app.route('/loads', methods=['POST', 'GET', 'PUT', 'DELETE'])
-def loads_get_post():
+def loads_get_post_put_delete():
+    # If client request does not include JSON, return error
+    if 'application/json' not in request.accept_mimetypes:
+        return (json.dumps({"Error": "Specified content type not supported"}), 406)
+
     if request.method == 'POST':
         content = request.get_json()
         
@@ -462,7 +448,7 @@ def loads_get_post():
         query = client.query(kind=constants.loads)
 
         # Pagination
-        q_limit = int(request.args.get('limit', '3'))
+        q_limit = int(request.args.get('limit', '5'))
         q_offset = int(request.args.get('offset', '0'))
         l_iterator = query.fetch(limit=q_limit, offset=q_offset)
         pages = l_iterator.pages
@@ -486,7 +472,10 @@ def loads_get_post():
         return 'Method not recognized'
 
 @app.route('/loads/<id>', methods=['DELETE', 'GET', 'PUT', 'PATCH'])
-def loads_put_delete_get(id):
+def load_put_patch_delete_get(id):
+    if 'application/json' not in request.accept_mimetypes:
+        return (json.dumps({"Error": "Specified content type not supported"}), 406)
+
     # Get load from datastore
     load_key = client.key(constants.loads, int(id))
     load = client.get(key=load_key)
@@ -511,6 +500,9 @@ def loads_put_delete_get(id):
         for e in results:
             for i, l in enumerate(e["loads"]):
                 if l.get("id") == load.id:
+                    auth_error = verify_jwt_header(e["owner"])
+                    if auth_error:
+                        return auth_error
                     e["loads"].pop(i)
                     client.put(e)
 
@@ -518,10 +510,6 @@ def loads_put_delete_get(id):
         client.delete(load_key)
         return ("", 204)
     elif request.method == 'PATCH': # Allows updating any subset of attributes while the other attributes remain unchanged. 
-        # If client requests anything other than JSON for this endpoint, return error
-        if 'application/json' not in request.accept_mimetypes:
-            return (json.dumps({"Error": "Specified content type not supported"}), 406)
-        
         content = request.get_json()
         request_weight = content.get("weight")
         request_content = content.get("content")
@@ -556,19 +544,15 @@ def loads_put_delete_get(id):
             "weight": load["weight"],
             "content": load["content"],
             "delivery_date": load["delivery_date"],
-            "self": app_url + "/loads/" + str(load.id)}), 201)
+            "self": app_url + "/loads/" + str(load.id)}), 200)
     elif request.method == 'PUT':
-        # If client requests anything other than JSON for this endpoint, return error
-        if 'application/json' not in request.accept_mimetypes:
-            return (json.dumps({"Error": "Specified content type not supported"}), 406)
-
         content = request.get_json()
         request_weight = content.get("weight")
         request_content = content.get("content")
         request_delivery_date = content.get("delivery_date")
 
-         # 400 Bad Request if all fields are missing
-        if request_weight == None and request_content == None and request_delivery_date == None:
+         # 400 Bad Request if any fields are missing
+        if request_weight == None or request_content == None or request_delivery_date == None:
             return (json.dumps({"Error": "The request object does not have all required attributes"}), 400)
 
         # Attempt to get the load from the datastore
@@ -584,7 +568,6 @@ def loads_put_delete_get(id):
                      "delivery_date": content["delivery_date"]})
         client.put(load)
 
-        # Set header with location of load
         load_url = app_url + "/loads/" + str(load.id)
 
         # Make JSON response
@@ -594,8 +577,7 @@ def loads_put_delete_get(id):
             "content": load["content"],
             "delivery_date": load["delivery_date"],
             "self": load_url}))
-            
-        res.headers.set('Load-Location', load_url)
+
         res.mimetype = 'application/json'
         res.status_code = 303
 
@@ -603,10 +585,12 @@ def loads_put_delete_get(id):
     else:
         return 'Method not recognized'
 
-
 # Get all loads on a boat
 @app.route('/boats/<boat_id>/loads', methods=['GET'])
 def get_boat_loads(boat_id):
+    if 'application/json' not in request.accept_mimetypes:
+        return (json.dumps({"Error": "Specified content type not supported"}), 406)
+
     boat_key = client.key(constants.boats, int(boat_id))
     boat = client.get(key=boat_key)
 
@@ -615,21 +599,28 @@ def get_boat_loads(boat_id):
             "loads": boat["loads"],
             "self": app_url + "/boats/" + str(boat_key.id) + "/loads"}), 200)
 
-# For putting a load into boats you can use a route like /boats/:boat_id/loads/:load_id 
-# and the same thing when removing a load but with a different HTTP Verb.
+# Putting a load into a specific boat
 @app.route('/boats/<boat_id>/loads/<load_id>', methods=['PUT', 'DELETE'])
 def loads_put_delete_boat(load_id, boat_id):
+    if 'application/json' not in request.accept_mimetypes:
+        return (json.dumps({"Error": "Specified content type not supported"}), 406)
+
     # Get load and boat from datastore
     load_key = client.key(constants.loads, int(load_id))
     load = client.get(key=load_key)
     boat_key = client.key(constants.boats, int(boat_id))
     boat = client.get(key=boat_key)
 
-    if request.method == 'PUT':
-        # 404 Not Found if invalid load or boat ID
-        if load == None or boat == None:
-            return (json.dumps({"Error": "The specified boat and/or load don't exist"}), 404)
+    # 404 Not Found if invalid load or boat ID
+    if load == None or boat == None:
+        return (json.dumps({"Error": "The specified boat and/or load don't exist"}), 404)
 
+    # Verify the provided JWT header matches the specified owner of the boat
+    auth_error = verify_jwt_header(boat["owner"])
+    if auth_error:
+        return auth_error
+
+    if request.method == 'PUT':
         # Get all boats
         query = client.query(kind=constants.boats)
         results = list(query.fetch())
