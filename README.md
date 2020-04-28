@@ -1,5 +1,5 @@
 # cs493-finalproject
-RESTful API in Python 3 and Flask
+RESTful API using Python 3, Flask, and Google Cloud Platform
 
 ## API/Assignment Description
 
